@@ -31,7 +31,7 @@ my $ua = LWP::UserAgent->new();
 
 
 my $req1 = GET 'https://api.github.com/repos/beebeeep/sandbox/hooks';
-$req1->authorization_basic("beebeeep", "theidaiRoghei0ai");
+$req1->authorization_basic("beebeeep", "");
 
 #my $req2 = HTTP::Request->new(POST => 'http://migalin.net/test.php');
 my $req2 = HTTP::Request->new(POST => 'https://api.github.com/repos/beebeeep/sandbox/hooks');
@@ -43,7 +43,7 @@ config => {
 	url => "http://git.welltime.ru/api/hook.php"
 }
 }));
-$req2->authorization_basic("beebeeep", "theidaiRoghei0ai");
+$req2->authorization_basic("beebeeep", "");
 
 my $response = $ua->request($req1);
 
