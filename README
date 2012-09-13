@@ -1,0 +1,6 @@
+This is a simple XMPP bot to notify developers about github commits, comments, pull-requests etc.
+
+It listens some TCP port and accepts HTTP requests from github.
+
+You need to setup some web hooks in your repo to enable notifications (check out documentation at http://developer.github.com/v3/repos/hooks/)
+
