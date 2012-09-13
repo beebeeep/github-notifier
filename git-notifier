@@ -10,12 +10,14 @@ use AnyEvent::XMPP::Client;
 use AnyEvent::HTTPD;
 
 use Data::Dumper;
-
+use Getopt::Std;
 use POSIX;
 use JSON;
+use Carp;
+
 
 my @developers = ('migalin@welltime.ru', 'arbuzov@welltime.ru', 'xoicy@welltime.ru', 'yaroslav@welltime.ru');
-my $httpd = AnyEvent::HTTPD->new (port => 9090);
+my $httpd;
 
 my $j = AnyEvent->condvar;
 my $cl = AnyEvent::XMPP::Client->new(debug => 0);
@@ -23,6 +25,27 @@ sub print_log
 {
 	return print(strftime('[%F %T] ', localtime()), @_);
 }
+
+sub daemonize                                                                       
+{                                                                                   
+	my ($log_filename, $pidfile) = @_;                                              
+	chdir '/';                                                                      
+	umask 0;                                                                        
+	open(STDIN, '<', '/dev/null')   or croak("Cannot read /dev/null: $!");          
+	if(defined $log_filename) {
+		open(STDOUT, '>>', $log_filename) or croak("Cannot write to $log_filename: $!");
+		open(STDERR, '>>', $log_filename) or croak("Cannot write to $log_filename: $!");
+	}
+	defined(my $pid = fork()) or croak("Cannot fork: $!");                          
+	exit if $pid;                                                                   
+	open( my $PIDFILE, '>', $pidfile) or croak("Cannot open pidfile $pidfile!\n");  
+	print $PIDFILE $$ . "\n";                                              
+	close($PIDFILE);                                                                
+	setsid or croak "Can't start a new session: $!";                                
+	$0 = 'github-notifier';                                                            
+	print_log "Github notifier daemon successfully started with PID $$\n";    
+	return 1;                                                                       
+}                                                                                   
 
 sub getDisplayName 
 {
@@ -57,7 +80,6 @@ sub parsePayload
 	#новый комментарий 
 	#новая issue(?)
 	#коммит 
-	print Dumper($payload);
 	if(defined ($payload->{'comment'})) {
 		print_log("Comment action\n");
 		my $user = $payload->{'sender'}->{'login'};
@@ -125,7 +147,6 @@ sub processRequest
 		print $req->parm("payload");
 		my $payload = from_json($req->parm("payload"), {utf8 => 1});
 
-		print_log(join(',' , keys %{$payload}) . "\n");
 		my $message = parsePayload($payload);
 
 		foreach my $jid (@developers) {
@@ -152,7 +173,6 @@ $cl->reg_cb (
 	},
 	contact_request_subscribe => sub {
 		my ($acc, $conn, $roster, $contact, $message) = @_;
-		print Dumper(@_);
 		$contact->send_subscribed();
 	}, 
 
@@ -166,8 +186,18 @@ $cl->reg_cb (
 	}
 );
 
+my %opts;
 
+getopts("p:l:i:d", \%opts);
 
+my $pidfile = (defined $opts{'i'})? $opts{'i'}:'/tmp/git-notifier.pid';
+my $port = (defined $opts{'p'})? $opts{'p'}:9090;
+my $do_daemon = defined($opts{'d'});
+my $logfile =  $opts{'l'} if (defined $opts{'l'});
+
+daemonize($logfile, $pidfile) if $do_daemon; 
+
+$httpd =  AnyEvent::HTTPD->new (port => $port);
 $httpd->reg_cb (request => \&processRequest);
 
 
