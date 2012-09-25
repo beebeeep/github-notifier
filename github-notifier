@@ -10,13 +10,15 @@ use AnyEvent::XMPP::Client;
 use AnyEvent::HTTPD;
 
 use Data::Dumper;
+use Data::Uniqid qw(uniqid);
 use Getopt::Std;
 use POSIX;
 use JSON;
 use Carp;
 
 
-my @developers = ('migalin@welltime.ru', 'arbuzov@welltime.ru', 'xoicy@welltime.ru', 'yaroslav@welltime.ru');
+#my @developers = ('migalin@welltime.ru', 'arbuzov@welltime.ru', 'xoicy@welltime.ru', 'yaroslav@welltime.ru');
+my @developers = ('migalin@welltime.ru');
 my $httpd;
 
 my $j = AnyEvent->condvar;
@@ -55,8 +57,9 @@ sub getDisplayName
 
 sub truncateSHA
 {
-	my $sha = shift;
-	return substr($sha, 0, 10);
+	my ($sha, $length) = @_;
+	$length = 10 if not defined $length;
+	return substr($sha, 0, $length);
 }
 
 sub getBranchName 
@@ -74,7 +77,10 @@ sub parsePayload
 	my %actions = (
 		'opened' => 'cоздал',
 		'closed' => 'закрыл',
+		'synchronize' => 'подтянул',
 	);
+
+	print Dumper($payload);
 	#обрабатываем следующие сообщения:
 	#пулл-реквест (создание, закрытие)
 	#новый комментарий 
@@ -108,8 +114,8 @@ sub parsePayload
 		my $diff = $pull_request->{'diff_url'};
 		my $body = $pull_request->{'body'};
 		my $title = $pull_request->{'title'};
-		my $base = $pull_request->{'base'}->{'label'};
-		my $head = $pull_request->{'head'}->{'label'};
+		my $base = $pull_request->{'base'}->{'repo'}->{'full_name'} . ':' . $pull_request->{'base'}->{'ref'};
+		my $head = $pull_request->{'head'}->{'repo'}->{'full_name'} . ':' . $pull_request->{'head'}->{'ref'};
 
 		$message = "Пользователь $user $action пулл-реквест ($url) из $head в $base:\n$title: $body\n\nСписок изменений: $diff";
 
@@ -118,6 +124,9 @@ sub parsePayload
 		my $user = $payload->{'pusher'}->{'name'};
 		my $branch = getBranchName($payload->{'ref'});
 		my $repo = $payload->{'repository'}->{'url'};
+		my $repo_name = $payload->{'repository'}->{'name'};
+		my $current_state =  truncateSHA($payload->{'head_commit'}->{'id'}, 12);
+		my $prev_state = truncateSHA($payload->{'before'}, 12);
 
 		if(scalar(@{$payload->{'commits'}}) > 0) {
 			my @push_commits;
@@ -125,10 +134,14 @@ sub parsePayload
 				push(@push_commits, getDisplayName($commit->{'committer'}) . "\n" . truncateSHA($commit->{'id'}) . ": "	. $commit->{'message'})
 			}
 			$message = "В репозиторий $repo в ветку $branch пользователем $user были отправлены следующие коммиты:\n" .
-			join("\n-----\n", @push_commits);
+			join("\n-----\n", @push_commits) . "\n========\nИзменения: $repo/compare/$prev_state...$current_state";
+			
+
 		} elsif($payload->{'after'} =~ /^0*$/ ) {
 			$message = "Пользователь $user удалил ветку $branch из репозитория $repo";
 		}
+		print_log("Running repo update script...\n");
+		system("/bin/sh -c '/home/vcs/scripts/update_repo.sh $repo_name &'");
 	}
 
 	print_log("message is $message\n");
@@ -158,7 +171,7 @@ sub processRequest
 }
 
 
-$cl->add_account ('github@welltime.ru', 'geeXi5ru4Ek7iez7', undef, undef, { resource => "Welltime", disable_ssl => "false" } );
+$cl->add_account ('github@welltime.ru', 'xxx', undef, undef, { resource => uniqid(), disable_ssl => "false" } );
 $cl->reg_cb (
 	session_ready => sub {
 		my ($cl, $acc) = @_;
