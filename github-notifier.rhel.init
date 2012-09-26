@@ -1,0 +1,116 @@
+#!/bin/sh
+#
+# github-notifier    Starts, Stops and Reloads github events notifier
+#
+# chkconfig: 2345 90 60
+# description: Github events notifier 
+# processname: github-notifier
+# pidfile: /var/run/github-notifier.pid
+#
+#  Tue Sep 25 14:34:04 MSK 2012 Migalin Danila <migalin@mcn.ru>
+# - Initial version
+#
+### BEGIN INIT INFO
+# Provides:		github-notifier
+# Required-Start:    $network 
+# Required-Stop:     $network 
+# Default-Start:	3 4 5
+# Default-Stop:		0 1 6
+# Short-Description:	Github notifier
+# Description:		Github notifier
+### END INIT INFO
+
+LOGFILE=/var/log/github-notifier.log
+PIDFILE=/var/run/vcs/github-notifier.pid
+# Full path to daemon
+DAEMON="/usr/bin/github-notifier"
+CONFIG=/etc/ghn-config.xml
+# Source function library.
+. /etc/rc.d/init.d/functions
+
+if ! [ -f $CONFIG ] ; then
+	echo "ERROR: $CONFIG not found"
+	exit 0
+fi
+
+if ! [ -x $DAEMON ] ; then
+	echo "ERROR: $DAEMON daemon not found"
+	exit 0
+fi
+
+if ! [ -f $LOGFILE ] ; then
+	echo "ERROR: Cannot find $LOGFILE"
+	exit 0
+fi
+
+
+
+#Default user
+USER=vcs
+
+RETVAL=0
+
+start() {
+	if [ -f $PIDFILE ] ; then
+		if [ -f  /proc/`cat $PIDFILE`/status ]; then
+			echo "Daemon is already running!"
+			return 1
+		else	
+			rm $PIDFILE
+		fi
+	fi
+	# Start daemons.
+	echo -n $"Starting github-notifier: "
+
+	daemon --user=$USER --pidfile=$PIDFILE $DAEMON -d -l $LOGFILE -i $PIDFILE -c $CONFIG
+	echo $$
+	sleep 1
+		
+	#check if daemon started 
+	! [ -f  /proc/`cat $PIDFILE`/status ] && RETVAL=1
+
+        [ $RETVAL -eq 0 ] && touch /var/lock/subsys/github-notifier
+		
+	echo
+	return $RETVAL
+}
+
+stop() {
+	# Stop daemons.
+	echo -n $"Shutting down github-notifier daemon: "
+	killproc `basename $DAEMON`
+	RETVAL=$?
+	[ $RETVAL -eq 0 ] && rm -f /var/lock/subsys/github-notifier
+	echo
+	return $RETVAL
+}
+
+restart() {
+	stop
+	start
+}
+
+reload() {
+	kill -1 `cat $PIDFILE`
+}
+
+# See how we were called.
+case "$1" in
+  start)
+	start
+	;;
+  stop)
+	stop
+	;;
+  restart)
+	restart
+	;;
+  reload)
+	reload
+	;;
+  *)
+	echo "Usage: $0 {start|stop|restart|reload|condrestart|status}"
+	exit 1
+esac
+
+exit $?

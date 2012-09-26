@@ -1,0 +1,22 @@
+<github-notifier>
+	<config 
+		name="daemon" 
+		daemonize="0"
+		log_file="/var/log/github-notifier.log"
+		pid_file="/var/run/vcs/github-notifier.pid" 
+		port="9090" />
+	<config 
+		name="xmpp" 
+		login="github@example.com"
+		password="secret" />
+	
+	<subscribers 
+		name="user1@example.com" 
+		token="<github oauth token>" />
+	<subscribers 
+		name="user2@example.com" />
+	<subscribers
+		name="user3@jabber.corp.example.ru" 
+		token="<github oauth token>" />
+</github-notifier>
+
