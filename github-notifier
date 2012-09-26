@@ -8,6 +8,8 @@ use AnyEvent;
 use AnyEvent::Impl::Perl;
 use AnyEvent::XMPP::Client;
 use AnyEvent::HTTPD;
+use AnyEvent::HTTP qw(http_request);
+use AnyEvent::TLS;
 
 use Data::Dumper;
 use Data::Uniqid qw(uniqid);
@@ -15,14 +17,15 @@ use Getopt::Std;
 use POSIX;
 use JSON;
 use Carp;
+use XML::Simple;
 
 
-#my @developers = ('migalin@welltime.ru', 'arbuzov@welltime.ru', 'xoicy@welltime.ru', 'yaroslav@welltime.ru');
-my @developers = ('migalin@welltime.ru');
 my $httpd;
-
 my $j = AnyEvent->condvar;
 my $cl = AnyEvent::XMPP::Client->new(debug => 0);
+my $config;
+my $subscribers;
+my $reply_url;
 sub print_log
 {
 	return print(strftime('[%F %T] ', localtime()), @_);
@@ -34,7 +37,7 @@ sub daemonize
 	chdir '/';                                                                      
 	umask 0;                                                                        
 	open(STDIN, '<', '/dev/null')   or croak("Cannot read /dev/null: $!");          
-	if(defined $log_filename) {
+	if(defined $log_filename and $log_filename ne '-') {
 		open(STDOUT, '>>', $log_filename) or croak("Cannot write to $log_filename: $!");
 		open(STDERR, '>>', $log_filename) or croak("Cannot write to $log_filename: $!");
 	}
@@ -80,7 +83,6 @@ sub parsePayload
 		'synchronize' => 'подтянул',
 	);
 
-	print Dumper($payload);
 	#обрабатываем следующие сообщения:
 	#пулл-реквест (создание, закрытие)
 	#новый комментарий 
@@ -96,10 +98,12 @@ sub parsePayload
 			my $issue_number = $payload->{'issue'}->{'number'};
 			my $issue_url = $payload->{'issue'}->{'html_url'};
 			$message = "Пользователь $user прокомментировал задачу #$issue_number \"$issue\" ($issue_url):\n$comment";
+			$reply_url = $payload->{'repository'}->{'url'} . '/issues/' . $issue_number . '/comments';
 		} elsif (defined ($payload->{'comment'}->{'commit_id'}) ) {
 			#комментарий к коммиту
 			my $commit_id = truncateSHA($payload->{'comment'}->{'commit_id'});
 			my $commit_url = $payload->{'comment'}->{'html_url'}; 
+			$reply_url = $payload->{'repository'}->{'url'} . '/commits/' . $payload->{'comment'}->{'commit_id'} . '/comments';
 			$message = "Пользователь $user прокомментировал коммит $commit_id ($commit_url):\n$comment";
 		}
 	} elsif(defined ($payload->{'pull_request'})) {
@@ -157,12 +161,11 @@ sub processRequest
 	$req->respond([200, 'OK']);
 
 	if(defined $req->parm("payload")) {
-		print $req->parm("payload");
 		my $payload = from_json($req->parm("payload"), {utf8 => 1});
 
 		my $message = parsePayload($payload);
-
-		foreach my $jid (@developers) {
+		foreach my $jid (keys %{$subscribers}) {
+			print_log("Sending message to $jid\n");
 			$cl->send_message($message => $jid, undef, 'chat');
 		}
 	}
@@ -171,7 +174,64 @@ sub processRequest
 }
 
 
-$cl->add_account ('github@welltime.ru', 'xxx', undef, undef, { resource => uniqid(), disable_ssl => "false" } );
+
+
+sub readConfig {
+
+	my $config_filename = 'ghn-config.xml';
+	my %opts;
+	my $cfg;
+
+	getopts("c:p:l:i:d", \%opts);
+
+	$config_filename = $opts{'c'} if defined ($opts{'c'});
+
+	$cfg = XMLin($config_filename) or croak("Cannot open config $config_filename!");
+
+	if((not defined $cfg->{'config'}->{'xmpp'}->{'login'}) or (not defined $cfg->{'config'}->{'xmpp'}->{'password'})) {
+		croak("You must specify XMPP connection credentials in $config_filename!");
+	}
+
+	#override config settings by command-line parameters
+	$cfg->{'config'}->{'daemon'}->{'pid_file'} =  $opts{'i'} if (defined $opts{'i'});
+	$cfg->{'config'}->{'daemon'}->{'log_file'} = $opts{'l'} if (defined $opts{'l'});
+	$cfg->{'config'}->{'daemon'}->{'daemonize'} = 1 if (defined $opts{'d'});
+	$cfg->{'config'}->{'daemon'}->{'port'} = $opts{'p'} if (defined $opts{'p'});
+
+
+	#load default values for unspecified settings
+	if(not defined $cfg->{'config'}->{'daemon'}->{'port'}) {
+		$cfg->{'config'}->{'daemon'}->{'port'} = 9090;
+	}
+	if(not defined $cfg->{'config'}->{'daemon'}->{'daemonize'}) {
+		$cfg->{'config'}->{'daemon'}->{'daemonize'} = 0;
+	}
+	if(not defined $cfg->{'config'}->{'daemon'}->{'pid_file'}) {
+		$cfg->{'config'}->{'daemon'}->{'pid_file'} = '/tmp/github-notifier.pid';
+	}
+	if(not defined $cfg->{'config'}->{'daemon'}->{'log_file'}) {
+		$cfg->{'config'}->{'daemon'}->{'log_file'} = '/tmp/github-notifier.lod';
+	}
+
+	return $cfg;
+}
+
+my $whole_config = readConfig();
+$config = $whole_config->{'config'};
+$subscribers = $whole_config->{'subscribers'};
+
+daemonize($config->{'daemon'}->{'log_file'}, $config->{'daemon'}->{'pid_file'}) if $config->{'daemon'}->{'daemonize'}; 
+
+$httpd = AnyEvent::HTTPD->new (port => $config->{'daemon'}->{'port'});
+$httpd->reg_cb (request => \&processRequest);
+
+$cl->add_account ($config->{'xmpp'}->{'login'}, $config->{'xmpp'}->{'password'}, 
+	undef, undef, { 
+		resource => $config->{'daemon'}->{'port'} . '-' . uniqid(), 
+		disable_ssl => "false" 
+	}
+);
+
 $cl->reg_cb (
 	session_ready => sub {
 		my ($cl, $acc) = @_;
@@ -196,25 +256,31 @@ $cl->reg_cb (
 	message => sub {
 		my ($cl, $acc, $msg) = @_;
 		print "message from: " . $msg->from . ": " . $msg->any_body . "\n";
+		my ($jid, $resource) = split(/\//, $msg->from);
+
+		if(defined $reply_url and defined $subscribers->{$jid}->{'token'} ) {
+			print_log("Posting comment from $jid... ");
+			http_request(
+				POST => $reply_url, 
+				headers => {
+					Authorization => 'token ' . $subscribers->{$jid}->{'token'}
+				}, 
+				body => to_json( { body => $msg->any_body }, { utf8 => 1} ),
+				sub {
+					my ($body, $headers) = @_;
+					print "done! Status: " . $headers->{'status'} . "\n";
+				}
+			);
+		} else {
+		    my $error = "Для вашей учётной запиcи не создан токен авторизации на Github";
+			$error = "Ваши комментарии здесь неуместны" if not defined $reply_url;
+
+			$cl->send_message($error => $msg->from, undef, 'chat');
+		}
+
 	}
 );
 
-my %opts;
-
-getopts("p:l:i:d", \%opts);
-
-my $pidfile = (defined $opts{'i'})? $opts{'i'}:'/tmp/git-notifier.pid';
-my $port = (defined $opts{'p'})? $opts{'p'}:9090;
-my $do_daemon = defined($opts{'d'});
-my $logfile =  $opts{'l'} if (defined $opts{'l'});
-
-daemonize($logfile, $pidfile) if $do_daemon; 
-
-$httpd =  AnyEvent::HTTPD->new (port => $port);
-$httpd->reg_cb (request => \&processRequest);
-
-
 $cl->start;
 $cl->set_presence("available", "Нормально делай - нормально будет!", 0);
-#$j->wait;
 AnyEvent::Impl::Perl::loop();

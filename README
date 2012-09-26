@@ -1,4 +1,5 @@
-This is a simple XMPP bot to notify developers about github commits, comments, pull-requests etc.
+This is a simple XMPP bot to notify developers about github commits, comments, pull-requests etc. 
+Also subscribers can send comments to pull-requests, issues and commits through XMPP.
 
 It listens some TCP port and accepts HTTP requests from github.
 
