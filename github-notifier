@@ -26,6 +26,8 @@ my $cl = AnyEvent::XMPP::Client->new(debug => 0);
 my $config;
 my $subscribers;
 my $reply_url;
+my $cli_options = {};
+
 sub print_log
 {
 	return print(strftime('[%F %T] ', localtime()), @_);
@@ -122,6 +124,7 @@ sub parsePayload
 		my $head = $pull_request->{'head'}->{'repo'}->{'full_name'} . ':' . $pull_request->{'head'}->{'ref'};
 
 		$message = "Пользователь $user $action пулл-реквест ($url) из $head в $base:\n$title: $body\n\nСписок изменений: $diff";
+		undef $reply_url;
 
 	} elsif (defined ($payload->{'commits'}) and ref($payload->{'commits'}) eq 'ARRAY') {
 		print_log("Commit action\n");
@@ -146,6 +149,7 @@ sub parsePayload
 		}
 		print_log("Running repo update script...\n");
 		system("/bin/sh -c '/home/vcs/scripts/update_repo.sh $repo_name &'");
+		undef $reply_url;
 	}
 
 	print_log("message is $message\n");
@@ -178,13 +182,14 @@ sub processRequest
 
 sub readConfig {
 
+	my $opts = shift;
+
 	my $config_filename = 'ghn-config.xml';
-	my %opts;
 	my $cfg;
 
-	getopts("c:p:l:i:d", \%opts);
+	$config_filename = $opts->{'c'} if defined ($opts->{'c'});
 
-	$config_filename = $opts{'c'} if defined ($opts{'c'});
+	print_log("Loading config from $config_filename\n");
 
 	$cfg = XMLin($config_filename) or croak("Cannot open config $config_filename!");
 
@@ -193,10 +198,10 @@ sub readConfig {
 	}
 
 	#override config settings by command-line parameters
-	$cfg->{'config'}->{'daemon'}->{'pid_file'} =  $opts{'i'} if (defined $opts{'i'});
-	$cfg->{'config'}->{'daemon'}->{'log_file'} = $opts{'l'} if (defined $opts{'l'});
-	$cfg->{'config'}->{'daemon'}->{'daemonize'} = 1 if (defined $opts{'d'});
-	$cfg->{'config'}->{'daemon'}->{'port'} = $opts{'p'} if (defined $opts{'p'});
+	$cfg->{'config'}->{'daemon'}->{'pid_file'} =  $opts->{'i'} if (defined $opts->{'i'});
+	$cfg->{'config'}->{'daemon'}->{'log_file'} = $opts->{'l'} if (defined $opts->{'l'});
+	$cfg->{'config'}->{'daemon'}->{'daemonize'} = 1 if (defined $opts->{'d'});
+	$cfg->{'config'}->{'daemon'}->{'port'} = $opts->{'p'} if (defined $opts->{'p'});
 
 
 	#load default values for unspecified settings
@@ -216,7 +221,56 @@ sub readConfig {
 	return $cfg;
 }
 
-my $whole_config = readConfig();
+sub handleXMPPMessage {
+	my ($cl, $acc, $msg) = @_;
+	print "message from: " . $msg->from . ": " . $msg->any_body . "\n";
+	my ($jid, $resource) = split(/\//, $msg->from);
+
+	if(defined $reply_url and defined $subscribers->{$jid}->{'token'} ) {
+		print_log("Posting comment from $jid... ");
+		http_request(
+			POST => $reply_url, 
+			headers => {
+				Authorization => 'token ' . $subscribers->{$jid}->{'token'}
+			}, 
+			body => to_json( { body => $msg->any_body }, { utf8 => 1} ),
+			sub {
+				my ($body, $headers) = @_;
+				print "done! Status: " . $headers->{'status'} . "\n";
+			}
+		);
+	} else {
+		my $error = "Для вашей учётной запиcи не создан токен авторизации на Github";
+		$error = "Ваши комментарии здесь неуместны" if not defined $reply_url;
+
+		$cl->send_message($error => $msg->from, undef, 'chat');
+	}
+
+}
+
+
+sub sighupHandler {
+	print_log("Catch SIGHUP, reload config.\n");
+	my $c = readConfig($cli_options);
+	#ignore config section, update only subscribers info
+	$subscribers = $c->{'subscribers'};
+	print_log("Daemon parameters ignored, loaded new subscribers: " . join(", ", keys(%{$subscribers})) . "\n");
+}
+
+##################
+
+
+
+getopts("c:p:l:i:d", $cli_options);
+
+my $sigset = POSIX::SigSet->new();
+$sigset->addset(&POSIX::SIGHUP);
+
+my $action = POSIX::SigAction->new("sighupHandler", $sigset, &POSIX::SA_NODEFER);
+POSIX::sigaction(&POSIX::SIGHUP, $action);
+
+
+my $whole_config = readConfig($cli_options);
 $config = $whole_config->{'config'};
 $subscribers = $whole_config->{'subscribers'};
 
@@ -253,34 +307,11 @@ $cl->reg_cb (
 		my ($cl, $acc, $err) = @_;
 		print "ERROR: " . $err->string . "\n";
 	},
-	message => sub {
-		my ($cl, $acc, $msg) = @_;
-		print "message from: " . $msg->from . ": " . $msg->any_body . "\n";
-		my ($jid, $resource) = split(/\//, $msg->from);
-
-		if(defined $reply_url and defined $subscribers->{$jid}->{'token'} ) {
-			print_log("Posting comment from $jid... ");
-			http_request(
-				POST => $reply_url, 
-				headers => {
-					Authorization => 'token ' . $subscribers->{$jid}->{'token'}
-				}, 
-				body => to_json( { body => $msg->any_body }, { utf8 => 1} ),
-				sub {
-					my ($body, $headers) = @_;
-					print "done! Status: " . $headers->{'status'} . "\n";
-				}
-			);
-		} else {
-		    my $error = "Для вашей учётной запиcи не создан токен авторизации на Github";
-			$error = "Ваши комментарии здесь неуместны" if not defined $reply_url;
-
-			$cl->send_message($error => $msg->from, undef, 'chat');
-		}
-
-	}
+	message => \&handleXMPPMessage,
 );
 
 $cl->start;
 $cl->set_presence("available", "Нормально делай - нормально будет!", 0);
+
+print_log("Daemon started with pid $$, now waiting for events\n");
 AnyEvent::Impl::Perl::loop();
